@@ -1,0 +1,42 @@
+# Independent source-guard review
+
+Status: implementation reviewed and 30 independent hand-authored adversarial tests passed before benchmark-wide scoring. Reviewed `src/verification/source_guard.py` SHA-256: `dac053de6e8e41276ec85247cb61201fb649c798be9005a2f984049830730819`. The final review includes early termination of bounded AST traversal and conversion of model-expression parser limits into guarded abstentions; all 30 tests were rerun on this version. Run `.venv/bin/python -m pytest -q tests/test_source_guard_adversarial.py` to repeat the checks. One pre-existing Pydantic configuration deprecation warning was emitted. No benchmark-wide scoring was performed for this review. The intended experiment replays saved evidence without new model calls; held-out cases remain outside scope.
+
+The guard should treat the model's expression as a claim requiring source support. Integer evaluation alone cannot establish that support. In particular, an expression may produce the correct number for the tested input while encoding a different dependency or operation. Any accepted equivalence policy must be stated explicitly: exact expanded AST comparison is conservative and may abstain on valid algebraic rewrites; value equality is weaker and permits coincidental agreement.
+
+The passing checks cover complete required citation provenance, omitted or invented prerequisite names, inconsistent definitions and duplicate identifiers, malformed source text, recursive definitions, future and same-position exclusion, incomplete contexts, unsafe expressions, and independence from gold metadata. Extra admissible citations are allowed; all source-required definition citations must still be present. These are hand-authored adversarial inputs, not held-out benchmark cases.
+
+The guard is expected to abstain on unsupported or inconsistent evidence without repairing saved predictions. A separately reported source-only deterministic baseline must make clear that this narrow grammar can be solved without a model. Neither a guarded success nor a source-only success demonstrates general textbook reasoning.
+
+## Counterexamples exercised
+
+- Source `f(x)=x+3`, target `f(2)=5`: bare `5`, `1+4`, `3+2`, and `(2+3)+0` are rejected despite numerical agreement. Declared normalization permits association of addition/multiplication, not reordering, folding, or inserted terms.
+- Source `f(x)=x+x`, target `f(2)=4`: `2*2` is rejected. This deliberately demonstrates a valid algebraic reformulation outside accepted structural equivalence, not a model error.
+- Transitive source `f(x)=g(x)+2`, `g(x)=x+1`: omitting citation `g` is rejected even if the calculation is correct. A complete required citation set plus an admissible irrelevant citation remains accepted under the specified policy.
+- A claimed gap naming `invented` instead of the actually absent `g` is withheld. A real missing dependency under incomplete context yields ABSTAIN. Same-position and future definitions do not supply the missing prerequisite; declared background definitions do.
+- A missing dependency on one branch cannot hide a cycle in the other branch. Cycles, duplicate identifiers, conflicting function definitions, unsupported source syntax, and excessively long source expressions do not become FAIL_GAP.
+- Preview text that also asserts `f(2)=99`, or states the assertion in words, is unsupported. The implementation now uses complete narrow preview patterns rather than the previously loose phrase check. Malformed equality left sides and compound equality assertions are rejected.
+- Explicitly forbidden, unspecified, or unrecognized arithmetic background abstains. Recognized addition-only background does not authorize multiplication. Integer arithmetic background does authorize the supported integer operators.
+- Nested call arguments are substituted correctly by the current implementation. Import/access syntax is rejected without execution. Injecting `expected`, `oracle`, `required_ids`, and `category` fields into an otherwise valid public payload leaves the result unchanged.
+
+## Assessment and limits
+
+No unresolved failing counterexample remains in this independent suite. This is bounded test evidence, not a proof of parser correctness or general adversarial robustness. The suite uses only hand-authored small inputs and does not establish behavior across arbitrary natural-language curricula.
+
+The guard trusts runner-supplied passage positions, background designation, and `context_complete`; it cannot independently certify that the full curriculum was supplied. Matching evidence uses strict syntax and rejects valid simplifications. Malformed unrelated admissible passages can make the entire analysis unsupported. Preview and background handling recognize intentionally narrow forms. Citation checks establish membership and required definition coverage, not truth of arbitrary explanatory prose.
+
+The source solver is the substantive mathematical mechanism for this grammar. Benchmark replay should report its standalone performance separately and preserve every rejection, error, and coverage denominator. Even perfect accepted-answer accuracy would not establish that a language model is necessary, that its reasoning improved, or that the approach generalizes to textbook passages.
+
+## Final independent replay assessment
+
+Replay reviewed after freeze: `artifacts/controlled_study/source_guard_replay_20260920`. The guarded-prediction SHA-256 was independently recomputed as `d60f5e7fa1917978657b16a1edbd1cd0f5ae0a21323996cf77ed997208cb6451`, matching the completed replay record. This section adds interpretation only; it does not alter source, model outputs, or primary scores.
+
+The seven Qwen correct-but-withheld answers separate into **four incorrect computations** already traced in `decomposed_evidence_review.md` (false cases from families 00, 02, 03, 06), and **three mathematically sound compressed calculations** (family 01 supported, background, false). In the latter three, the model replaces the source's `2+2` with `2*2`, preserving the value 9 in `(2*2+1)+2+2`. The checker accepts only associative normalization and therefore rejects this rewrite. Those three rejections are conservative coverage losses, not evidence that the model calculated incorrectly.
+
+The five Mistral correct-but-withheld answers separate into **four incorrect computations** (false cases from families 03, 04, 06, 07), and **one correct computation with an omitted required citation** (family 01 background). The latter returns `(2+(2+1)+2)+2`, matching source value 9, but cites only `fun1_0`; computing the target also uses `fun1_1`. This rejection enforces the declared citation requirement, not a numerical error.
+
+An independent read-only check re-expanded visible definitions from the historical model payloads for every accepted development output, without calling the source guard or reading oracle metadata. For equality tasks it collected the ordered integer terms from recursive addition and compared them to the model expression flattened only across addition; it also checked actual missing functions and required source citations. All **33 accepted outputs** passed: **13 numeric expressions** matched the source's ordered expansion and numerical result, **six gap findings** named the genuinely absent dependency with complete context, and **14 previews** matched the nonassertive preview wording. No accepted incorrect numerical result or substitution was found in this inspected set. This does not establish correctness outside these saved inputs.
+
+The full-set results remain **Qwen 22/48** and **Mistral 11/48**, with accepted coverage of approximately **45.8%** and **22.9%**. Accepted-only accuracy is 22/22 and 11/11; it must not be described as 100% accuracy on the full task. The source-only baseline's reported 48/48 development and 7/7 fixture performance demonstrates that these deliberately restricted expressions are solvable without a language model. It is not novel AI capability.
+
+The supported research decision is to **stop tuning on these familiar synthetic cases**. Preserve the negative and coverage findings, retain this grammar as an engineering diagnostic, and decide the next study using independently validated natural-textbook examples and an explicit account of what requires model judgment. Neither further optimization of these synthetic scores nor passing more source-only checks would establish educational usefulness or generalization. Held-out data remains outside this review.

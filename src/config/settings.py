@@ -33,6 +33,20 @@ class Settings(BaseSettings):
         default="",
         description="OpenAI API key for GPT-4o and GPT-4o-mini",
     )
+    openai_base_url: Optional[str] = Field(
+        default=None, description="OpenAI-compatible endpoint; set to local Ollama for offline inference",
+    )
+    lean_binary: Optional[str] = None
+    lake_binary: Optional[str] = None
+
+    def create_openai_client(self):
+        from openai import OpenAI
+        return OpenAI(
+            api_key=self.openai_api_key,
+            base_url=self.openai_base_url,
+            timeout=self.openai_timeout,
+            max_retries=self.openai_max_retries,
+        )
     
     # Model selection - STANDARDIZED TO GPT-4o-mini for cost efficiency
     # All tasks now use gpt-4o-mini to preserve $5 budget
@@ -133,6 +147,9 @@ class Settings(BaseSettings):
     
     def validate_openai_key(self) -> bool:
         """Check if OpenAI API key is configured."""
+        from urllib.parse import urlsplit
+        if self.openai_base_url and urlsplit(self.openai_base_url).hostname in {'127.0.0.1', 'localhost', '::1'}:
+            return bool(self.openai_api_key)
         return bool(self.openai_api_key and self.openai_api_key.startswith("sk-"))
     
     def estimate_cost(

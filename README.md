@@ -7,6 +7,26 @@
 
 **MathemaTest** is a research framework for identifying "pedagogical gaps" (missing prerequisites) in mathematical textbooks using a novel **Causal GraphRAG** architecture. By enforcing strict temporal causality on retrieval—preventing the "Future Leakage" common in standard RAG—we enable Large Language Models to simulate the state of a linear learner.
 
+The current implementation combines source-scoped retrieval, Neo4j relationship provenance, PDF/OCR ingestion, exact rational arithmetic, and Lean 4 checks. It also fails closed when evidence is out of scope, a graph relationship lacks an explicit source witness, or an answer contains a supported numerical contradiction.
+
+## Current engineering KPIs
+
+These are reproducible development and integrity results, not production accuracy claims:
+
+| KPI | Result | Scope |
+| :--- | :--- | :--- |
+| Automated regression suite | **308/308 tests passing** | Provenance, retrieval, ingestion, graph extraction, arithmetic, and verification contracts |
+| Locked artifact integrity | **189/189 entries matched** | Frozen NCERT feasibility study |
+| Relationship guard replay | **9/9 flawed or only partly supported edges quarantined** | Previously audited NCERT edges |
+| Relationship coverage check | **4/4 supported candidates retained** | Inspected Electricity development set after guard tuning |
+| Live numerical development check | **3/3 correct numeric values** | Three exposed NCERT Electricity questions; two accepted and one safely rejected for a contradictory assumption |
+
+The live check deliberately distinguishes numerical correctness from solution reliability: MathemaTest rejected an otherwise correct `8 A` response because its stated `100 Ω` assumption contradicted the question's `60 V / 4 A = 15 Ω` operating point. See [the assumption-consistency report](MATHEMATEST_ASSUMPTION_CHECK_RESULTS.md) and [the fresh-study limitations](NCERT_FRESH_STUDY_RESULTS.md).
+
+### Resume-ready description
+
+> Built MathemaTest, a Python/Neo4j/ChromaDB neuro-symbolic GraphRAG pipeline for source-grounded textbook auditing, with PDF/OCR ingestion, temporal retrieval constraints, exact arithmetic, and Lean 4 verification. Added provenance and consistency guards that matched 189/189 frozen artifact checks, quarantined 9/9 previously flagged graph edges, and caught a contradictory physics assumption before answer acceptance.
+
 Our system was evaluated on the *OpenStax Calculus Vol 1* corpus, where it correctly flagged **47.9%** of theorems as having missing or forward-referencing definitions, a capability that standard "Naive RAG" masks (93.3% Failure Rate) due to hallucinated validity.
 
 This repository contains the source code, dataset, and formal verification findings for the paper:  
@@ -110,7 +130,7 @@ We argue that integrating specialized reasoning models like **DeepSeek-Prover-V1
 ### Installation
 1.  **Clone & Install:**
     ```bash
-    git clone https://github.com/VedantShirgaonkar/MathemaTest.git
+    git clone https://github.com/neil-ravat/MathemaTest.git
     cd MathemaTest
     pip install -r requirements.txt
     ```

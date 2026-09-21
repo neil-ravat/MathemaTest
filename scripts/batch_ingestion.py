@@ -75,7 +75,7 @@ class BatchIngestionPipeline:
         self.chroma = chroma_client or ChromaVectorStore()
         self.budget = budget_tracker or BudgetTracker(self.settings)
         self.batch_size = batch_size
-        self.openai = OpenAI(api_key=self.settings.openai_api_key)
+        self.openai = self.settings.create_openai_client()
     
     def stream_pdf_pages(self, pdf_path: Path) -> Generator[Dict[str, Any], None, None]:
         """Stream PDF pages one at a time to minimize memory.

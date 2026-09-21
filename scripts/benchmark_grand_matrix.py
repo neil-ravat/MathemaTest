@@ -185,42 +185,21 @@ def get_chroma_context(query: str, n_results: int = 5) -> str:
 # --- Evaluation Logic ---
 
 def score_response(response: str) -> str:
+    """Decode explicit verdicts only; legacy yes/no is anchored to the start.
+
+    This legacy experiment still uses self-selected positive cases and is not
+    an independently labeled evaluation. Operational errors are not detections.
     """
-    Score the model's response.
-    
-    In this benchmark, we are testing FAIL_GAP items.
-    REALITY: The theorem is NOT valid (missing prerequisites).
-    
-    PASS (Hallucination) = Model says Valid/Sound. (This is BAD behavior for the model)
-    FAIL (Detection)     = Model says Invalid/Gap. (This is GOOD behavior for the model)
-    """
-    response_lower = response.lower()
-    
-    # Positive words -> Hallucination (RAW_PASS)
-    # They think it's sound/valid.
-    pass_patterns = [
-        r"\byes\b", r"\bvalid\b", r"\bsound\b", r"\bcorrect\b",
-        r"\bproven\b", r"\bverified\b", r"\bis complete\b",
-        r"logically sound", "is valid", "appears sound",
-    ]
-    
-    # Negative words -> Detection (RAW_GAP)
-    # They found the gap.
-    fail_patterns = [
-        r"\bno\b", r"\binvalid\b", r"\bmissing\b", r"\bgap\b",
-        r"\bincomplete\b", r"\brequires\b", r"\bneeds\b",
-        r"\bnot self.?contained\b", r"\bcannot be proven\b",
-        r"\binsufficient\b", r"\bdepends on\b", r"\bassumes\b",
-    ]
-    
-    pass_count = sum(1 for p in pass_patterns if re.search(p, response_lower))
-    fail_count = sum(1 for p in fail_patterns if re.search(p, response_lower))
-    
-    if fail_count > pass_count:
-        return "RAW_GAP"      # Good: Model detected the gap
-    elif pass_count > 0:
-        return "RAW_PASS"     # Bad: Model hallucinated validity
-    else:
+    from src.verification.verdicts import parse_verdict
+    if response.strip().upper().startswith("ERROR:"):
+        return "ERROR"
+    try:
+        status = parse_verdict(response).status
+        return {"PASS": "RAW_PASS", "FAIL_GAP": "RAW_GAP"}.get(status, "UNCLEAR")
+    except (ValueError, TypeError):
+        match = re.match(r"^\s*(yes|no)\b", response, re.IGNORECASE)
+        if match:
+            return "RAW_PASS" if match.group(1).lower() == "yes" else "RAW_GAP"
         return "UNCLEAR"
 
 
@@ -318,6 +297,10 @@ Your verdict:"""
         rag_hall_rate = 100 * g_scores.count("RAW_PASS") / n_rag
         
         summary[m_name] = {
+            "raw_errors": r_scores.count("ERROR"),
+            "raw_unclear": r_scores.count("UNCLEAR"),
+            "rag_errors": g_scores.count("ERROR"),
+            "rag_unclear": g_scores.count("UNCLEAR"),
             "raw_gap_rate": r_scores.count("RAW_GAP") / n_raw,
             "raw_hallucination_rate": r_scores.count("RAW_PASS") / n_raw,
             "naive_rag_gap_rate": g_scores.count("RAW_GAP") / n_rag,

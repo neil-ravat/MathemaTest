@@ -1,0 +1,9 @@
+# Fresh native-text feasibility subset — amendment v1
+
+Declared before body extraction of the reserved PDFs. This bounded operational study supplements the60-family proposed pilot; it is neither a completed60-case sample nor a powered confirmatory evaluation.
+
+Selection: in each reserved chapter, select the first two distinct numbered `Example` headings in source order whose question ends at the subsequent `Solution` marker before any next numbered example. Match headings only at line start after optional whitespace; accept integer or decimal numbers. Limit question length to8000characters as a boundary-detection guard. If fewer than two are detected, retain the shortfall and every boundary failure; do not choose replacements according to content or answers. This deterministic convenience rule is not random or representative. The candidate selector does not print source body/answers.
+
+Inputs contain only original question text, original PDF/text hashes, source locators and the exact earlier prefix cutoff. Native text may corrupt mathematical notation. Freeze selection/output hashes before any answer generation. Run all selected cases; record unsupported types and corrupt extraction explicitly. Only then may AI reviewers inspect reference solutions and compare results, withholding arm names where practical. This changes the timing of reference review for this operational subset only; outcome-blind eligibility and preservation of all cases are mandatory. AI labels are reference agreement, not expert accuracy. Earlier answers in legitimate prefixes can remain, but a target's own solution or future text cannot.
+
+Freshness means these target contents were not inspected/tuned by the development agents before selection; public NCERT content may be in model training. The reservation and machine extraction do not guarantee pretrained-model novelty. Do not run the heldout72 synthetic cases. Do not alter the existing development datasets.

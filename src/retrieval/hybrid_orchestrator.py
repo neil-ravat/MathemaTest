@@ -8,6 +8,7 @@ then merges and re-ranks results using a cross-encoder model.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -15,6 +16,13 @@ from src.config.settings import get_settings, Settings
 from src.graph_store.neo4j_client import Neo4jClient, MockNeo4jClient
 from src.vector_store.chroma_client import ChromaVectorStore, MockChromaVectorStore
 from src.retrieval.query_refiner import QueryRefiner, RefinedQuery, MockQueryRefiner
+
+
+def has_rule_statement(text):
+    """Conservative retrieval cue, not evidence validation or formula recognition."""
+    text = ' '.join(text.casefold().split())
+    return bool(re.search(r'\b(?:is|are|we)\s+(?:defined|define|called|expressed)\b|'
+                          r'\b(?:directly|inversely) proportional\b|=', text))
 
 
 logger = logging.getLogger(__name__)
@@ -377,26 +385,39 @@ class HybridRetriever:
     def retrieve_for_audit(
         self,
         query: str,
-        current_chapter: int,
+        current_chapter: Optional[int] = None,
         n_results: int = 10,
         rerank: bool = True,
+        *,
+        source_id: Optional[str] = None,
+        before_position: Optional[int] = None,
     ) -> List[RetrievalResult]:
-        """Retrieve context with chapter-based lobotomy filter.
-        
-        This is the strict entry point for the Textbook Auditor. It ensures
-        no data leakage by only returning content from chapters BEFORE
-        the current chapter being audited.
+        """Retrieve audit context, optionally scoped to an exact source and position.
+
+        With both source_id and before_position, use end_offset <= before_position
+        instead of chapter filtering, permitting preceding same-chapter passages.
+        Scoped branch failures propagate. Without scope, preserve legacy inclusive
+        chapter behavior and best-effort branches.
+
+        Legacy chapter-only mode does not guarantee same-chapter source ordering;
+        callers needing that guarantee must provide the source-position scope.
         
         Args:
             query: Search query text.
-            current_chapter: The chapter being audited. Only content from
-                            chapters < current_chapter will be returned.
+            current_chapter: Legacy inclusive chapter cutoff; ignored in scoped mode.
             n_results: Maximum number of results.
             rerank: Whether to apply cross-encoder re-ranking.
             
         Returns:
             List of RetrievalResult objects from allowed chapters only.
         """
+        if (source_id is None) != (before_position is None):
+            raise ValueError("source_id and before_position must be supplied together")
+        if source_id is not None:
+            if not source_id or type(before_position) is not int or before_position < 0:
+                raise ValueError("Scope requires a nonempty source_id and nonnegative integer position")
+            return self._retrieve_scoped(query, source_id, before_position, n_results, rerank)
+
         logger.info(f"Lobotomized retrieval: query='{query[:50]}...', max_chapter={current_chapter}")
         
         # Vector search with chapter filter
@@ -451,6 +472,87 @@ class HybridRetriever:
         
         return merged
     
+    def _retrieve_scoped(self, query, source_id, before_position, n_results, rerank):
+        """Source-position audit: missing provenance is excluded; branch failures propagate."""
+        if type(n_results) is not int or n_results < 1:
+            raise ValueError("n_results must be a positive integer")
+        scope = {"source_id": source_id, "before_position": before_position}
+
+        def allowed(metadata):
+            return (metadata.get("source_id") == source_id
+                    and type(metadata.get("start_offset")) is int
+                    and type(metadata.get("end_offset")) is int
+                    and 0 <= metadata["start_offset"] < metadata["end_offset"] <= before_position)
+
+        vector = []
+        for row in self.vector_store.search(query=query, n_results=n_results * 2, **scope):
+            metadata = dict(row.get("metadata") or {})
+            if allowed(metadata):
+                vector.append(RetrievalResult(row["id"], row["content"], "vector",
+                                              row.get("score", 0.5), metadata))
+        # A separate rule channel prevents similar exercises from filling every slot.
+        support_query = 'Find the governing law, defining equation and conditions of validity for: ' + query
+        rule_filter = {'$or': [{'$contains': term} for term in
+                              ('law', 'Law', 'theorem', 'Theorem', 'define', 'proportional', 'formula', 'expressed')]}
+        support = []
+        for row in self.vector_store.search(query=support_query, n_results=n_results * 2,
+                                            where_document=rule_filter, **scope):
+            metadata = dict(row.get('metadata') or {})
+            if allowed(metadata) and has_rule_statement(row['content']):
+                metadata['retrieval_role'] = 'rule_candidate'
+                support.append(RetrievalResult(row['id'], row['content'], 'vector',
+                                               row.get('score', 0.5), metadata))
+        seeds = self.graph_client.search_concepts(
+            query=query, limit=n_results, seed_ids=[r.id for r in vector], **scope)
+        graph = []
+        trace = {"seed_ids": [], "expansions": []}
+
+        def append_graph(row, provenance):
+            node = dict(row.get("node") or {})
+            if not allowed(node) or not isinstance(node.get("content"), str) or not node["content"].strip():
+                return False
+            node["types"] = row.get("types", [])
+            node["graph_provenance"] = [provenance]
+            graph.append(RetrievalResult(node.get("id", node.get("node_id", "")),
+                                         node["content"], "graph", 0.7, node))
+            return True
+
+        for seed in seeds:
+            seed_id = seed.get("node", {}).get("id")
+            if not seed_id or not append_graph(seed, {"kind": "seed", "seed_id": seed_id}):
+                continue
+            trace["seed_ids"].append(seed_id)
+            for row in self.graph_client.get_prerequisites(seed_id, depth=2, **scope):
+                provenance = {"kind": "prerequisite", "seed_id": seed_id,
+                              "distance": row["distance"], "path_ids": row["path_ids"],
+                              "edge_type": "PREREQUISITE_OF", "traversal": "incoming"}
+                if append_graph(row, provenance):
+                    trace["expansions"].append(provenance)
+
+        merged = {}
+        for result in vector + graph + support:
+            if result.id in merged:
+                existing = merged[result.id]
+                if result.metadata.get("graph_provenance"):
+                    existing.metadata.setdefault("graph_provenance", []).extend(result.metadata["graph_provenance"])
+            else:
+                merged[result.id] = result
+        results = list(merged.values())
+        # Reranker failures are intentionally not converted into empty/partial success.
+        results = self.reranker.rerank(query, results, top_k=n_results) if rerank and results else results[:n_results]
+        if support:
+            selected = self.reranker.rerank(support_query, support, top_k=1)[0] if rerank else support[0]
+            selected = merged[selected.id]
+            selected.metadata['retrieval_role'] = 'rule_candidate'
+            span = lambda r: (r.metadata['start_offset'], r.metadata['end_offset'], r.content)
+            results = [selected] + [r for r in results if span(r) != span(selected)][:n_results-1]
+            trace['selected_rule_id'] = selected.id
+        trace['rule_candidate_ids'] = [r.id for r in support]
+        for result in results:
+            result.metadata["audit_scope"] = scope.copy()
+            result.metadata["graph_trace"] = trace
+        return results
+
     def close(self):
         """Close all connections."""
         self.graph_client.close()

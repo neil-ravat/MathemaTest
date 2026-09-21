@@ -60,7 +60,7 @@ class CrossSourceRelationshipExtractor:
     def __init__(self):
         self.settings = get_settings()
         self.neo4j = Neo4jClient()
-        self.openai = OpenAI(api_key=self.settings.openai_api_key)
+        self.openai = self.settings.create_openai_client()
         self.budget = BudgetTracker(self.settings)
     
     def get_concepts_by_source(self, source_pattern: str = None) -> List[Dict[str, Any]]:

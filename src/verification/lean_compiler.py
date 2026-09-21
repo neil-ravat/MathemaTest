@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from openai import OpenAI
-from src.config.settings import get_settings
+from src.config.settings import get_settings, Settings
 
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,9 @@ class LeanCompilationResult:
     """Result of Lean 4 compilation.
     
     verification_type can be:
-    - "VERIFIED_PROOF": Full proof compiled successfully
-    - "VERIFIED_STRUCTURE": Theorem statement valid (proof used sorry)
+    - "COMPILED_UNREVIEWED": Compiler accepted code; theorem fidelity and axioms unreviewed
+    - "VERIFIED_STRUCTURE": Statement-only diagnostic, never proof success
+    - "TOOLCHAIN_ERROR": Real compiler unavailable; no simulated verification
     - "FAIL_LEAN": Compilation failed
     - "FAIL_STRUCTURE": Even skeleton with sorry failed
     """
@@ -93,17 +94,22 @@ open Real Set Function
     MATHLIB_PROJECT_DIR = Path(__file__).parent.parent.parent / "mathematest"
     VERIFICATION_DIR = MATHLIB_PROJECT_DIR / "Mathematest" / "Verification"
     
-    def __init__(self, lean_project_path: Optional[Path] = None, use_mathlib: bool = True):
+    def __init__(self, lean_project_path: Optional[Path] = None, use_mathlib: bool = True,
+                 settings: Optional[Settings] = None):
         """Initialize Lean 4 compiler.
         
         Args:
             lean_project_path: Path to existing Lean 4 project. If None, uses mathematest/.
             use_mathlib: If True, uses lake build with Mathlib project.
         """
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
+        if self.settings.lean_binary:
+            self.LEAN_PATH = Path(self.settings.lean_binary).resolve()
+        if self.settings.lake_binary:
+            self.LAKE_PATH = Path(self.settings.lake_binary).resolve()
         self.lean_project_path = lean_project_path or self.MATHLIB_PROJECT_DIR
         self.use_mathlib = use_mathlib
-        self.openai = OpenAI(api_key=self.settings.openai_api_key)
+        self.openai = self.settings.create_openai_client()
         
         # Set up environment with elan PATH
         self.env = dict(os.environ)
@@ -112,6 +118,7 @@ open Real Set Function
             self.env["PATH"] = f"{elan_bin}:{self.env.get('PATH', '')}"
         
         # Ensure Verification directory exists
+        self.VERIFICATION_DIR = self.lean_project_path / "Mathematest" / "Verification"
         self.VERIFICATION_DIR.mkdir(parents=True, exist_ok=True)
         
         # Check if Lean is available
@@ -135,7 +142,7 @@ open Real Set Function
         except (subprocess.SubprocessError, FileNotFoundError):
             pass
         
-        logger.warning("Lean 4 not installed - using simulation mode")
+        logger.warning("Lean 4 not installed - formal verification unavailable")
         return False
     
     def _check_mathlib_available(self) -> bool:
@@ -182,7 +189,7 @@ open Real Set Function
             full_code = (self.LEAN_PRELUDE + lean_code) if use_prelude else lean_code
             
             if not self.lean_available:
-                return self._simulate_compilation(full_code)
+                return LeanCompilationResult(False, full_code, "Lean is not installed", ["Lean toolchain unavailable; no simulation performed"], [], [], "TOOLCHAIN_ERROR")
             
             return self._run_lean_compiler(full_code)
     
@@ -217,7 +224,9 @@ open Real Set Function
             error_locations = self._extract_error_locations(result.stdout + result.stderr)
             
             return LeanCompilationResult(
-                success=result.returncode == 0 and not errors,
+                success=result.returncode == 0 and not errors and not re.search(r"\b(sorry|admit|axiom)\b", lean_code),
+                verification_type=("INCOMPLETE_PROOF" if re.search(r"\b(sorry|admit|axiom)\b", lean_code)
+                                   else "COMPILED_UNREVIEWED" if result.returncode == 0 and not errors else "FAIL_LEAN"),
                 code=lean_code,
                 output=result.stdout + result.stderr,
                 errors=errors,
@@ -287,7 +296,7 @@ open Real Set Function
                 errors=[],
                 warnings=full_result.warnings,
                 error_locations=[],
-                verification_type="VERIFIED_PROOF",
+                verification_type=full_result.verification_type,
             )
         
         # Step 2: Full proof failed - try skeleton
@@ -313,7 +322,7 @@ open Real Set Function
             # Skeleton compiled - theorem structure is valid!
             logger.info("Skeleton verification succeeded - theorem structure valid")
             return LeanCompilationResult(
-                success=True,  # Treat as success for auditor
+                success=False,  # Statement elaboration is not a completed proof
                 code=skeleton_code,
                 output=skeleton_result.output,
                 errors=[],
@@ -354,12 +363,14 @@ open Real Set Function
                 env=self.env,
             )
             
-            errors = self._parse_lean_errors(result.stderr)
-            warnings = self._parse_lean_warnings(result.stderr)
-            error_locations = self._extract_error_locations(result.stderr)
+            errors = self._parse_lean_errors(result.stdout + result.stderr)
+            warnings = self._parse_lean_warnings(result.stdout + result.stderr)
+            error_locations = self._extract_error_locations(result.stdout + result.stderr)
             
             return LeanCompilationResult(
-                success=result.returncode == 0 and not errors,
+                success=result.returncode == 0 and not errors and not re.search(r"\b(sorry|admit|axiom)\b", lean_code),
+                verification_type=("INCOMPLETE_PROOF" if re.search(r"\b(sorry|admit|axiom)\b", lean_code)
+                                   else "COMPILED_UNREVIEWED" if result.returncode == 0 and not errors else "FAIL_LEAN"),
                 code=lean_code,
                 output=result.stdout + result.stderr,
                 errors=errors,
@@ -378,91 +389,6 @@ open Real Set Function
             )
         finally:
             temp_path.unlink(missing_ok=True)
-    
-    def _simulate_compilation(self, lean_code: str) -> LeanCompilationResult:
-        """Simulate Lean compilation using GPT-4o-mini validation."""
-        prompt = f"""Analyze this Lean 4 code for syntax and semantic errors:
-
-```lean
-{lean_code}
-```
-
-Respond with JSON:
-{{
-    "valid": true/false,
-    "errors": ["list of errors if any"],
-    "warnings": ["list of warnings if any"],
-    "suggestions": ["suggestions for fixing"]
-}}
-"""
-        
-        try:
-            response = self.openai.chat.completions.create(
-                model=self.settings.default_model,
-                messages=[
-                    {"role": "system", "content": "You are a Lean 4 expert. Analyze code for errors."},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=500,
-                temperature=0.1,
-            )
-            
-            content = response.choices[0].message.content
-            
-            # Parse JSON response
-            import json
-            # Extract JSON from response
-            if "```" in content:
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-            
-            try:
-                parsed = json.loads(content.strip())
-                return LeanCompilationResult(
-                    success=parsed.get("valid", False),
-                    code=lean_code,
-                    output=str(parsed),
-                    errors=parsed.get("errors", []),
-                    warnings=parsed.get("warnings", []),
-                    error_locations=[],
-                )
-            except json.JSONDecodeError:
-                # Fallback: check for obvious issues
-                return self._basic_syntax_check(lean_code)
-                
-        except Exception as e:
-            logger.error(f"Simulation failed: {e}")
-            return self._basic_syntax_check(lean_code)
-    
-    def _basic_syntax_check(self, lean_code: str) -> LeanCompilationResult:
-        """Basic syntax validation without Lean compiler."""
-        errors = []
-        warnings = []
-        
-        # Check for unbalanced braces/parens
-        if lean_code.count("{") != lean_code.count("}"):
-            errors.append("Unbalanced curly braces")
-        if lean_code.count("(") != lean_code.count(")"):
-            errors.append("Unbalanced parentheses")
-        if lean_code.count("[") != lean_code.count("]"):
-            errors.append("Unbalanced square brackets")
-        
-        # Check for common Lean patterns
-        if "theorem" in lean_code and ":=" not in lean_code and "by" not in lean_code:
-            errors.append("Theorem declared but no proof provided")
-        
-        if "sorry" in lean_code:
-            warnings.append("Proof contains 'sorry' placeholder")
-        
-        return LeanCompilationResult(
-            success=len(errors) == 0,
-            code=lean_code,
-            output="Basic syntax check (Lean not available)",
-            errors=errors,
-            warnings=warnings,
-            error_locations=[],
-        )
     
     def _parse_lean_errors(self, output: str) -> List[str]:
         """Extract error messages from Lean output."""
@@ -516,7 +442,7 @@ THEOREM: {theorem_statement}
         
         prompt += """
 
-Generate valid Lean 4 code. Use standard Mathlib tactics. If you cannot prove it completely, use 'sorry' as placeholder.
+Generate Lean 4 code with a complete proof. Do not use sorry, admit, or new axioms.
 
 ```lean
 """
@@ -591,7 +517,7 @@ Generate valid Lean 4 code. Use standard Mathlib tactics. If you cannot prove it
             attempts.append(attempt)
             
             if result.success:
-                logger.info(f"Proof verified successfully on attempt {attempt_num}")
+                logger.info(f"Code compiled on attempt {attempt_num}; proof statement and axioms still need review")
                 return True, attempts
             
             logger.warning(f"Attempt {attempt_num} failed: {result.errors}")
@@ -626,7 +552,7 @@ ERRORS:
 
 ORIGINAL THEOREM: {theorem_statement}
 
-Fix the errors and provide corrected Lean 4 code. Use 'sorry' if you cannot complete the proof.
+Fix the errors and provide corrected Lean 4 code. Do not use sorry, admit, or new axioms.
 
 ```lean
 """

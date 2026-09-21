@@ -131,6 +131,10 @@ class ChromaVectorStore:
         where: Optional[Dict] = None,
         include_distances: bool = True,
         max_chapter: Optional[int] = None,
+        *,
+        source_id: Optional[str] = None,
+        before_position: Optional[int] = None,
+        where_document: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
         """Search for similar documents.
         
@@ -139,19 +143,35 @@ class ChromaVectorStore:
             n_results: Maximum number of results.
             where: Metadata filter.
             include_distances: Include similarity scores.
-            max_chapter: If provided, only return documents from chapters < max_chapter.
-                        This is the "lobotomy" filter for preventing data leakage.
+            max_chapter: Legacy inclusive chapter cutoff, ignored in scoped mode.
+            source_id: Exact source namespace; must accompany before_position.
+            before_position: Include only passages ending at or before this offset.
+            where_document: Optional Chroma text filter, combined with the same source scope.
             
         Returns:
             List of matching documents with scores.
         """
+        if (source_id is None) != (before_position is None):
+            raise ValueError("source_id and before_position must be supplied together")
+        scoped = source_id is not None
+        if scoped and (not source_id or type(before_position) is not int or before_position < 0):
+            raise ValueError("Scope requires a nonempty source_id and nonnegative integer position")
         query_embedding = self.embedder.embed(query)
         
         # Build the where clause with optional chapter filtering
         effective_where = where.copy() if where else None
         
-        if max_chapter is not None:
-            # Lobotomy filter: only include chapters strictly less than max_chapter
+        if scoped:
+            scope_filter = {"$and": [
+                {"source_id": {"$eq": source_id}},
+                {"start_offset": {"$gte": 0}},
+                {"start_offset": {"$lt": before_position}},
+                {"end_offset": {"$gt": 0}},
+                {"end_offset": {"$lte": before_position}},
+            ]}
+            effective_where = {"$and": [effective_where, scope_filter]} if effective_where else scope_filter
+        elif max_chapter is not None:
+            # Legacy inclusive chapter boundary retained for existing callers.
             chapter_filter = {"chapter": {"$lte": max_chapter}}
             
             if effective_where:
@@ -164,6 +184,7 @@ class ChromaVectorStore:
             query_embeddings=query_embedding.tolist(),
             n_results=n_results,
             where=effective_where,
+            **({"where_document": where_document} if where_document is not None else {}),
             include=["documents", "metadatas", "distances"] if include_distances else ["documents", "metadatas"],
         )
         
@@ -178,6 +199,14 @@ class ChromaVectorStore:
             if include_distances and results.get("distances"):
                 item["distance"] = results["distances"][0][i]
                 item["score"] = 1 - item["distance"]  # Convert distance to similarity
+            metadata = item["metadata"] or {}
+            if scoped and not (
+                metadata.get("source_id") == source_id
+                and type(metadata.get("start_offset")) is int
+                and type(metadata.get("end_offset")) is int
+                and 0 <= metadata["start_offset"] < metadata["end_offset"] <= before_position
+            ):
+                continue
             output.append(item)
         
         return output

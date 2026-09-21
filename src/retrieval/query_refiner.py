@@ -85,7 +85,7 @@ class QueryRefiner:
         self.budget_tracker = budget_tracker or BudgetTracker(self.settings)
         
         if self.settings.validate_openai_key():
-            self.openai = OpenAI(api_key=self.settings.openai_api_key)
+            self.openai = self.settings.create_openai_client()
         else:
             self.openai = None
             logger.warning("OpenAI API key not configured")

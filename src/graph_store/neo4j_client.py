@@ -8,6 +8,7 @@ for mathematical concept nodes and their relationships.
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +38,9 @@ class Neo4jClient:
     
     # Relationship types with their properties
     EDGE_TYPES = {
+        **{kind: ['source_id', 'start_offset', 'end_offset', 'content', 'reason', 'relationship_review']
+           for kind in ('MEASURES', 'FLOWS_THROUGH', 'CONTROLS', 'EXPRESSES',
+                        'USES_QUANTITY', 'HAS_UNIT', 'CANDIDATE_PREREQUISITE_OF')},
         "PREREQUISITE_OF": ["weight", "source_id"],
         "DERIVED_FROM": ["proof_method", "source_id"],
         "GROUNDED_IN": ["application", "source_id"],
@@ -244,48 +248,51 @@ class Neo4jClient:
             return dict(record["n"]) if record else None
     
     def get_prerequisites(
-        self,
-        concept_id: str,
-        depth: int = 2,
-        max_chapter: Optional[int] = None,
+        self, concept_id: str, depth: int = 2,
+        max_chapter: Optional[int] = None, *,
+        source_id: Optional[str] = None, before_position: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Get prerequisite concepts for a given concept.
-        
-        Args:
-            concept_id: ID of the concept to find prerequisites for.
-            depth: Maximum depth of prerequisite chain.
-            max_chapter: If provided, only return prerequisites from chapters < max_chapter.
-                        This is the "lobotomy" filter for preventing data leakage.
-            
-        Returns:
-            List of prerequisite nodes with their relationships.
+        """Follow incoming prerequisite edges; scope all node and edge evidence."""
+        if type(depth) is not int or depth < 1:
+            raise ValueError("depth must be a positive integer")
+        scope = self._audit_scope(source_id, before_position, "v")
+        conditions = []
+        params = {"id": concept_id}
+        if scope:
+            conditions.append(f"ALL(v IN nodes(path) WHERE {scope})")
+            edge_scope = self._audit_scope(source_id, before_position, "r")
+            conditions.append(f"ALL(r IN relationships(path) WHERE {edge_scope})")
+            params.update(source_id=source_id, before_position=before_position)
+        elif max_chapter is not None:
+            conditions.append("prereq.chapter <= $max_chapter")
+            params["max_chapter"] = max_chapter
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        query = f"""
+            MATCH path = (c {{id: $id}})<-[:PREREQUISITE_OF*1..{depth}]-(prereq)
+            {where}
+            RETURN prereq, length(path) AS distance,
+                   [v IN nodes(path) | v.id] AS path_ids
+            ORDER BY distance, prereq.id
         """
-        # Build query with optional chapter filter
-        if max_chapter is not None:
-            query = """
-                MATCH path = (c {id: $id})-[:PREREQUISITE_OF*1..]->(prereq)
-                WHERE length(path) <= $depth
-                  AND prereq.chapter <= $max_chapter
-                RETURN prereq, length(path) as distance
-                ORDER BY distance
-            """
-            params = {"id": concept_id, "depth": depth, "max_chapter": max_chapter}
-        else:
-            query = """
-                MATCH path = (c {id: $id})-[:PREREQUISITE_OF*1..]->(prereq)
-                WHERE length(path) <= $depth
-                RETURN prereq, length(path) as distance
-                ORDER BY distance
-            """
-            params = {"id": concept_id, "depth": depth}
-        
         with self.session() as session:
-            result = session.run(query, **params)
-            return [
-                {"node": dict(r["prereq"]), "distance": r["distance"]}
-                for r in result
-            ]
-    
+            return [{"node": dict(r["prereq"]), "distance": r["distance"],
+                     "path_ids": r["path_ids"]} for r in session.run(query, **params)]
+
+    @staticmethod
+    def _audit_scope(source_id, before_position, alias="n"):
+        if (source_id is None) != (before_position is None):
+            raise ValueError("source_id and before_position must be supplied together")
+        if source_id is None:
+            return ""
+        if not source_id or type(before_position) is not int or before_position < 0:
+            raise ValueError("Scope requires a nonempty source_id and nonnegative integer position")
+        return (f"{alias}.source_id = $source_id AND "
+                f"{alias}.start_offset IS :: INTEGER AND "
+                f"{alias}.end_offset IS :: INTEGER AND "
+                f"{alias}.start_offset >= 0 AND "
+                f"{alias}.start_offset < {alias}.end_offset AND "
+                f"{alias}.end_offset <= $before_position")
+
     def get_misconceptions(self, concept_id: str) -> List[Dict[str, Any]]:
         """Get misconceptions related to a concept.
         
@@ -347,55 +354,38 @@ class Neo4jClient:
             ]
     
     def search_concepts(
-        self,
-        query: str,
-        max_chapter: Optional[int] = None,
-        limit: int = 10,
+        self, query: str, max_chapter: Optional[int] = None, limit: int = 10, *,
+        source_id: Optional[str] = None, before_position: Optional[int] = None,
+        seed_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Search for concepts by name or description.
-        
-        Args:
-            query: Search query text.
-            max_chapter: If provided, only return nodes from chapters < max_chapter.
-                        This is the "lobotomy" filter for preventing data leakage.
-            limit: Maximum number of results.
-            
-        Returns:
-            List of matching concept nodes.
-        """
-        query_lower = query.lower()
-        
-        # Build query with optional chapter filter
-        # Note: Using $search_term to avoid conflict with session.run() kwargs
-        if max_chapter is not None:
-            cypher = """
-                MATCH (n)
-                WHERE (toLower(n.name) CONTAINS $search_term
-                   OR toLower(n.description) CONTAINS $search_term
-                   OR toLower(n.statement) CONTAINS $search_term)
-                  AND n.chapter <= $max_chapter
-                RETURN n, labels(n) as types
-                LIMIT $limit
-            """
-            params = {"search_term": query_lower, "max_chapter": max_chapter, "limit": limit}
+        """Find scoped seeds by vector IDs or individual terms; retain legacy substring search."""
+        scope = self._audit_scope(source_id, before_position)
+        params = {"limit": limit}
+        if scope:
+            # ponytail: lexical seed matching; vector IDs cover synonyms without another model call.
+            terms = sorted(set(re.findall(r"[a-z]{3,}", query.lower())) -
+                           {"the", "and", "for", "find", "what", "given", "from", "its"})
+            params.update(terms=terms, seed_ids=seed_ids or [], source_id=source_id,
+                          before_position=before_position)
+            match = """(n.id IN $seed_ids OR ANY(term IN $terms WHERE
+                toLower(coalesce(n.name, '')) CONTAINS term OR
+                toLower(coalesce(n.content, '')) CONTAINS term OR
+                toLower(coalesce(n.description, '')) CONTAINS term))"""
+            where = f"{scope} AND {match}"
+            order = "ORDER BY CASE WHEN n.id IN $seed_ids THEN 0 ELSE 1 END, n.id"
         else:
-            cypher = """
-                MATCH (n)
-                WHERE toLower(n.name) CONTAINS $search_term
-                   OR toLower(n.description) CONTAINS $search_term
-                   OR toLower(n.statement) CONTAINS $search_term
-                RETURN n, labels(n) as types
-                LIMIT $limit
-            """
-            params = {"search_term": query_lower, "limit": limit}
-        
+            params["search_term"] = query.lower()
+            where = """(toLower(n.name) CONTAINS $search_term OR
+                toLower(n.description) CONTAINS $search_term OR
+                toLower(n.statement) CONTAINS $search_term)"""
+            if max_chapter is not None:
+                where += " AND n.chapter <= $max_chapter"
+                params["max_chapter"] = max_chapter
+            order = ""
         with self.session() as session:
-            result = session.run(cypher, **params)
-            return [
-                {"node": dict(r["n"]), "types": r["types"]}
-                for r in result
-            ]
-    
+            records = session.run(f"MATCH (n) WHERE {where} RETURN n, labels(n) AS types {order} LIMIT $limit", **params)
+            return [{"node": dict(r["n"]), "types": r["types"]} for r in records]
+
     def get_graph_stats(self) -> Dict[str, Any]:
         """Get statistics about the knowledge graph.
         

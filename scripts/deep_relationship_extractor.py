@@ -70,7 +70,7 @@ class DeepRelationshipExtractor:
     def __init__(self):
         self.settings = get_settings()
         self.neo4j = Neo4jClient()
-        self.openai = OpenAI(api_key=self.settings.openai_api_key)
+        self.openai = self.settings.create_openai_client()
         self.stats = {
             "concepts_processed": 0,
             "relationships_created": 0,

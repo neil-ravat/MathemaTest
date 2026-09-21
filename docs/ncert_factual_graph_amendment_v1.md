@@ -1,0 +1,17 @@
+# Factual graph comparison amendment v1
+
+Declared before fresh comparative model calls. This amendment supersedes the prerequisite-only graph-arm description in `ncert_comparative_protocol_v1.md` for the current exploratory comparison. It does not change the preserved earlier protocol or turn factual relationships into learning prerequisites.
+
+The available automatic extractor produces provisional factual relationships, with **zero accepted educational prerequisite edges**. Accordingly, the experiment tests whether one-hop factual source connections improve answer support relative to vector retrieval. It cannot establish improved prerequisite auditing or pedagogical validity. Any future prerequisite system requires a separate version and evaluation.
+
+All arms use native Ollama `/api/chat`, the same pinned `qwen2.5-coder:7b` weight digest, temperature0, seed42, context window16384 and output cap1500. The direct arm has no retrieved evidence and may use learned knowledge; it remains a secondary answer comparator. Arm execution rotates deterministically by case index.
+
+Both retrieval arms share the same index of original native-text paragraphs and automatically extracted entity excerpts. They use the same eight vector seeds, reranker, four-passage maximum and6000-character budget. Thus vector retrieval can already retrieve automatically localized entity evidence: this comparison isolates factual edge expansion, not all effects of graph preprocessing.
+
+For the graph arm, inspect one hop along factual relationships incident to each original vector seed in either direction. The allowed relations are `CONTROLS`, `DERIVED_FROM`, `EXPRESSES`, `FLOWS_THROUGH`, `HAS_UNIT`, `MEASURES` and `USES_QUANTITY`. Traversing an incoming edge for relevance does not reverse its factual meaning; preserve original subject/object/direction in provenance. Add original neighbor excerpts and original edge-evidence excerpts as candidates. Do not supply model-generated descriptions as evidence. Merge identical source spans, preserve all provenance, rerank and apply the same final context budget as vector retrieval.
+
+Each seed, neighbor and edge must have the permitted source ID, strict integer offsets `0 <= start < end <= target_start`, and content identical to the corresponding original source slice. Endpoint semantic roles must match the stored edge direction. Unknown or invalid evidence is rejected. Record discovered and rejected factual paths and which evidence survives the final context budget. Distinguish unique logical paths from per-passage provenance records, which may duplicate a path for neighbor and edge evidence.
+
+Failed graph extraction yields a recorded graph-arm error under the current no-fallback policy; no hand-curated graph may replace it. An empty graph or zero surviving expansion is reported explicitly. The fair comparison must count these outcomes rather than score only successful graphs. Cases with no graph-provided evidence cannot establish an exercised augmentation benefit.
+
+The ten-case fresh feasibility subset uses its separate predeclared selection amendment. Predictions are frozen before source/reference review for that subset, then two AI reviewers label sources without seeing system outputs. Keep extraction defects, uncertain references and failed arms in operational denominators. Results are exploratory AI-reference agreement and engineering measurements, not independent expert accuracy. No synthetic reserved answer set is part of this run.

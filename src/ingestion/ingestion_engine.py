@@ -9,7 +9,10 @@ ready for knowledge graph population.
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 import logging
+import re
+import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -37,6 +40,36 @@ from src.ingestion.ocr_utils import OCRValidator
 
 
 logger = logging.getLogger(__name__)
+
+
+def _digital_documents(text, source_id, chapter, split_boundaries=()):
+    """Partition native text without changing it; offsets are [start, end) characters."""
+    boundaries = set(split_boundaries)
+    if any(type(x) is not int or not 0 <= x <= len(text) for x in boundaries):
+        raise ValueError("Split boundaries must be character offsets within extracted text")
+    documents = []
+    page_start = 0
+    pages = text.split("\f")
+    if pages[-1] == "":
+        pages.pop()  # Poppler terminates its final page with a form feed.
+    for page_number, page in enumerate(pages, 1):
+        cuts = {page_start, page_start + len(page)}
+        for match in re.finditer(r"\n[ \t]*\n", page):
+            cuts.update((page_start + match.start(), page_start + match.end()))
+        cuts.update(x for x in boundaries if page_start < x < page_start + len(page))
+        ordered = sorted(cuts)
+        for start, end in zip(ordered, ordered[1:]):
+            content = text[start:end]
+            if content.strip():
+                documents.append({
+                    "id": f"{source_id}:{start}:{end}",
+                    "source_id": source_id, "chapter": chapter,
+                    "pdf_page": page_number, "start_offset": start, "end_offset": end,
+                    "content": content, "extraction_method": "pdftotext -layout",
+                    "formula_layout_verified": False,
+                })
+        page_start += len(page) + 1
+    return documents, len(pages)
 
 
 class IngestionEngine:
@@ -98,6 +131,42 @@ class IngestionEngine:
         self.dpi = dpi
         self.use_gpu = use_gpu
     
+    @staticmethod
+    def process_pdf_region(pdf_path, page_number, bbox, output_dir):
+        """Preserve equation/diagram pixels and native coordinates for visual review."""
+        from src.ingestion.pdf_region import extract_pdf_region
+        return extract_pdf_region(pdf_path, page_number, bbox, output_dir)
+
+    @staticmethod
+    def process_digital_pdf(pdf_path, source_id, chapter, split_boundaries=()):
+        """Extract native PDF text only, independently of the unfinished OCR route.
+
+        Returns exact UTF-8 Poppler output with global character offsets and
+        one-based PDF pages. Caller-provided boundaries can separate a target
+        from prior text within a paragraph. No formulas are corrected and no
+        layout, table, or mathematical fidelity is certified. Call on the class
+        to avoid initializing OCR components.
+        """
+        pdf_path = Path(pdf_path).resolve(strict=True)
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("source_id must be a nonempty string")
+        pdf_hash = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+        result = subprocess.run(
+            ["pdftotext", "-layout", str(pdf_path), "-"],
+            capture_output=True, check=True,
+        )
+        text = result.stdout.decode("utf-8")
+        if not text.strip():
+            raise ValueError("PDF has no extractable native text; OCR is required")
+        documents, total_pages = _digital_documents(text, source_id, chapter, split_boundaries)
+        return {
+            "source_id": source_id, "chapter": chapter, "pdf_sha256": pdf_hash,
+            "text": text, "documents": documents, "total_pages": total_pages,
+            "extraction_method": "pdftotext -layout", "mode": "native_text_only",
+            "formula_layout_verified": False,
+            "limitations": "Native text and raw table layout only; diagrams and mathematical fidelity are not verified.",
+        }
+
     def process_pdf(
         self,
         pdf_path: Union[str, Path],
@@ -158,6 +227,7 @@ class IngestionEngine:
                     page_number=page_num,
                     document_id=document_id,
                     document_name=pdf_path.name,
+                    errors=errors,
                 )
                 all_blocks.extend(page_blocks)
             except Exception as e:
@@ -217,12 +287,14 @@ class IngestionEngine:
         
         logger.info(f"Processing image: {document_name}")
         
+        errors: list[str] = []
         try:
             blocks = self._process_page(
                 image=image,
                 page_number=page_number,
                 document_id=document_id,
                 document_name=document_name,
+                errors=errors,
             )
         except Exception as e:
             logger.error(f"Image processing failed: {e}")
@@ -241,8 +313,21 @@ class IngestionEngine:
             total_pages=1,
             blocks=blocks,
             processing_time_seconds=round(time.time() - start_time, 2),
-            errors=[],
+            errors=errors,
         )
+
+    def _extract_text(self, image: Image.Image) -> str:
+        """OCR a detected prose crop; math/diagram fidelity is not certified."""
+        buffer = BytesIO()
+        image.convert("RGB").save(buffer, format="PNG")
+        result = subprocess.run(
+            ["tesseract", "stdin", "stdout", "--psm", "6", "-l", "eng"],
+            input=buffer.getvalue(), capture_output=True, check=True, timeout=60,
+        )
+        text = result.stdout.decode("utf-8").strip()
+        if not text:
+            raise ValueError("Text OCR returned no content")
+        return text
     
     def _process_page(
         self,
@@ -250,6 +335,7 @@ class IngestionEngine:
         page_number: int,
         document_id: str,
         document_name: str,
+        errors: list[str],
     ) -> list[StructuredBlock]:
         """Process a single page image.
         
@@ -272,6 +358,9 @@ class IngestionEngine:
             page_number=page_number,
         )
         
+        if not layout_blocks:
+            errors.append(f"Page {page_number}: no layout blocks detected")
+
         # Step 2: Process each block
         structured_blocks: list[StructuredBlock] = []
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -297,6 +386,9 @@ class IngestionEngine:
             if layout_block.block_type == BlockType.FORMULA:
                 raw_content = latex_strings[formula_idx] if formula_idx < len(latex_strings) else ""
                 formula_idx += 1
+                if not raw_content.strip():
+                    errors.append(f"Page {page_number} block {block_idx}: formula OCR returned no content")
+                    continue
                 
                 # Normalize LaTeX for SymPy
                 normalized = self.latex_normalizer.normalize(raw_content)
@@ -308,15 +400,25 @@ class IngestionEngine:
                     contains_variables=self.latex_normalizer.extract_variables(raw_content),
                     contains_functions=self.latex_normalizer.extract_functions(raw_content),
                 )
-            else:
-                # Non-formula blocks (text, figures, tables)
-                raw_content = f"[{layout_block.block_type.value} block]"
+            elif layout_block.block_type in {BlockType.TEXT, BlockType.TITLE, BlockType.LIST, BlockType.CAPTION}:
+                try:
+                    crop = self.layout_analyzer.crop_block(image, layout_block)
+                    raw_content = self._extract_text(crop)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    errors.append(f"Page {page_number} block {block_idx}: text OCR failed: {exc}")
+                    continue
                 symbolic_metadata = SymbolicMetadata(
                     latex_normalized=None,
                     sympy_parseable=False,
                     complexity_score=0.0,
                 )
             
+            else:
+                errors.append(f"Page {page_number} block {block_idx}: "
+                              f"{layout_block.block_type.value} extraction unsupported; "
+                              f"source region {layout_block.bbox.to_xyxy()} requires visual review")
+                continue
+
             # Create source info for traceability
             source_info = SourceInfo(
                 document_id=document_id,
@@ -457,6 +559,9 @@ class MockIngestionEngine(IngestionEngine):
             **kwargs,
         )
     
+    def _extract_text(self, image: Image.Image) -> str:
+        return "Mock text content for ingestion tests."
+
     def _pdf_to_images(
         self,
         pdf_path: Path,
