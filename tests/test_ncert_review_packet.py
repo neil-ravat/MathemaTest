@@ -5,6 +5,11 @@ from scripts import prepare_ncert_review_packet as packet
 
 
 def test_packet_blinding_and_prefix_boundaries(tmp_path, monkeypatch):
+    if not (packet.SOURCE / 'candidates.json').exists():
+        pytest.skip('Local development inputs required')
+    candidates = json.loads((packet.SOURCE / 'candidates.json').read_text())
+    if any(not (packet.SOURCE / 'raw' / f"{c['source_id']}.pdf").exists() for c in candidates):
+        pytest.skip('Original textbook PDFs are not distributed with the code release')
     monkeypatch.setattr(packet, 'OUT', tmp_path)
     packet.main()
     cases = json.loads((tmp_path / 'cases.json').read_text())

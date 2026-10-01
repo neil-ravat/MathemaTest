@@ -49,6 +49,17 @@ def render(node, unsupported):
     tag = node.tag.split("}")[-1]
     children = [render(c, unsupported) for c in node]
     if node.tag.startswith(MATH):
+        if tag == "mtable":
+            # Keep row/cell boundaries: concatenation can turn distinct rules
+            # into one false equation. Spanning/layout-dependent cells stay gated.
+            if any(n.get(a, "1") != "1" for n in node.iter()
+                   for a in ("rowspan", "columnspan")):
+                unsupported.add("spanned-mtable")
+            return " table[ " + " ; ".join(children) + " ] "
+        if tag in {"mtr", "mlabeledtr"}:
+            return "row[ " + " | ".join(children) + " ]"
+        if tag == "mtd":
+            return (node.text or "") + "".join(children)
         if tag == "mfrac" and len(children) == 2:
             return f"(({children[0]})/({children[1]}))"
         if tag in ("msup", "msub") and len(children) == 2:
@@ -69,6 +80,17 @@ def render(node, unsupported):
         return (node.text or "") + "".join(children)
     if tag == "link" and node.get("target-id"):
         return f" [reference:{node.get('document', '')}#{node.get('target-id')}] "
+    if tag in {"figure", "media", "image"}:
+        return " [unrendered-media] "
+    if tag == "table":
+        if any(n.get(a) for n in node.iter() for a in ("namest", "nameend", "morerows")):
+            unsupported.add("spanned-cnxml-table")
+        return " table[ " + " ; ".join(children) + " ] "
+    if tag == "row":
+        return "row[ " + " | ".join(children) + " ]"
+    if node.tag in {CN + "sup", CN + "sub"}:
+        content = (node.text or "") + "".join(t + (c.tail or "") for c, t in zip(node, children))
+        return ("^" if tag == "sup" else "_") + "(" + content + ")"
     return (node.text or "") + "".join(t + (c.tail or "") for c, t in zip(node, children))
 
 

@@ -1,0 +1,75 @@
+{
+  "model": "openai/gpt-oss-120b",
+  "provider": "groq",
+  "cases": [
+    {
+      "case_id": "physics-supported",
+      "expected": "MODEL_SUPPORTED",
+      "initial_status": "MODEL_SUPPORTED",
+      "final_status": "MODEL_SUPPORTED",
+      "task_facts": {
+        "status": "SUFFICIENT",
+        "missing_facts": [],
+        "rationale": "The target provides distance (90 m) and time (15 s). Evidence E1 supplies the required formula average speed = distance \u00f7 time, allowing computation of the answer."
+      },
+      "reviewer_grounding_valid": true
+    },
+    {
+      "case_id": "physics-omitted_rule",
+      "expected": "REVIEW_REQUIRED",
+      "initial_status": "REVIEW_REQUIRED",
+      "final_status": "REVIEW_REQUIRED",
+      "task_facts": {
+        "status": "SUFFICIENT",
+        "missing_facts": [],
+        "rationale": "The target provides total distance (90 m) and total time (15 s). Evidence E0 supplies the definition of average speed as distance divided by time, allowing calculation of 90/15 = 6 m/s."
+      },
+      "reviewer_grounding_valid": true
+    },
+    {
+      "case_id": "physics-missing_task_fact",
+      "expected": "REVIEW_REQUIRED",
+      "initial_status": "ERROR",
+      "final_status": "REVIEW_REQUIRED",
+      "task_facts": {
+        "status": "MISSING_TASK_FACT",
+        "missing_facts": [
+          "elapsed time value"
+        ],
+        "rationale": "The target asks for average speed, which requires both total distance and total elapsed time. While the distance (90 metres) is provided and the formula is given in the evidence, the elapsed time is not specified and cannot be derived from the supplied information."
+      },
+      "reviewer_grounding_valid": true
+    }
+  ],
+  "initial_status_matches": 2,
+  "status_matches_after_one_review_retry": 3,
+  "planned": 3,
+  "api_attempts": 18,
+  "successful_responses": 17,
+  "reported_tokens": 19519,
+  "failed_request_usage_unknown": true,
+  "source_unchanged": true,
+  "retry_request_identical": true,
+  "accuracy": null,
+  "independent_labels": false,
+  "qualitative_review": "Assistant inspection, not independent expert labels",
+  "issues": [
+    {
+      "case_id": "physics-omitted_rule",
+      "stage": "task_facts",
+      "finding": "Rationale falsely claims E0 supplies distance divided by time; E0 only names distance/time. Correct final rejection does not validate this explanation."
+    },
+    {
+      "case_id": "physics-omitted_rule",
+      "stage": "challenge",
+      "finding": "Observation says E0 contains a definition while the blocking issue says definition absent; explanation is inconsistent."
+    },
+    {
+      "case_id": "physics-missing_task_fact",
+      "stage": "proposal_and_review",
+      "finding": "Flags recognition of insufficient information as an untaught prerequisite. This is a questionable extra gap; task_facts correctly identifies missing elapsed time."
+    }
+  ],
+  "scope": "Three previously inspected synthetic average-speed controls, no textbook/PDF/full-book evaluation or independent accuracy estimate. Same-model review; no Lean proof.",
+  "billing": "User-configured Groq Free plan; no billing changes or paid-provider fallback; account billing was not inspected."
+}
